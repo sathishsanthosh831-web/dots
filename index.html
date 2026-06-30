@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Dots and Boxes - Multiplayer</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { text-align: center; background: #222; color: white; font-family: sans-serif; padding: 10px; }
+        canvas { background: white; border: 5px solid #61dafb; cursor: pointer; touch-action: none; margin-top: 10px; max-width: 95vw; }
+        #lobby { max-width: 400px; margin: 40px auto; }
+        input { padding: 10px; font-size: 16px; border-radius: 5px; border: none; margin: 5px; width: 200px; text-align: center; }
+        button { padding: 10px 20px; font-size: 16px; border-radius: 5px; border: none; background: #61dafb; cursor: pointer; margin: 5px; }
+        button:hover { background: #4ec3e8; }
+        #roomInfo { margin-top: 10px; font-size: 18px; }
+        #roomCodeDisplay { font-weight: bold; color: #61dafb; font-size: 24px; letter-spacing: 3px; }
+        #game { display: none; }
+        .hidden { display: none; }
+        #scoreBoard { display: flex; justify-content: center; gap: 40px; margin: 10px 0; font-size: 18px; }
+        .p1color { color: #ff5555; }
+        .p2color { color: #5599ff; }
+        #copyBtn { font-size: 12px; padding: 5px 10px; }
+        #micBtn.active { background: #4caf50; }
+        #micBtn.muted { background: #f44336; }
+        #controls { margin: 10px 0; }
+    </style>
+</head>
+<body>
+
+<div id="lobby">
+    <h1>Dots and Boxes</h1>
+
+    <div id="createSection">
+        <h3>Create a Room</h3>
+        <button id="createBtn">Create Room</button>
+    </div>
+
+    <hr style="margin:25px 0; border-color:#444;">
+
+    <div id="joinSection">
+        <h3>Join a Room</h3>
+        <input type="text" id="joinCodeInput" placeholder="Enter Room Code" maxlength="6" style="text-transform:uppercase;">
+        <br>
+        <button id="joinBtn">Join Room</button>
+    </div>
+
+    <div id="roomInfo" class="hidden">
+        <p>Room Code: <span id="roomCodeDisplay"></span> <button id="copyBtn">Copy</button></p>
+        <p id="waitingMsg">Waiting for the other player to join...</p>
+    </div>
+</div>
+
+<div id="game">
+    <h2 id="status">Player 1's Turn</h2>
+    <div id="scoreBoard">
+        <div class="p1color">Player 1: <span id="score1">0</span></div>
+        <div class="p2color">Player 2: <span id="score2">0</span></div>
+    </div>
+    <p id="youAre"></p>
+    <div id="controls">
+        <button id="restartBtn">🔄 Restart</button>
+        <button id="micBtn">🎤 Start Voice Chat</button>
+        <span id="callStatus" style="margin-left:10px; font-size:14px; color:#aaa;"></span>
+    </div>
+    <canvas id="gameCanvas" width="450" height="450"></canvas>
+</div>
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-app.js";
+  import {
+    getDatabase, ref, set, get, update, onValue, onDisconnect, child, push, onChildAdded, remove
+  } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyALuADab1aUCSASnVi0Th4WjrNXpQsjScE",
+    authDomain: "dots-48476.firebaseapp.com",
+    databaseURL: "https://dots-48476-default-rtdb.firebaseio.com",
+    projectId: "dots-48476",
+    storageBucket: "dots-48476.firebasestorage.app",
+    messagingSenderId: "614007870177",
+    appId: "1:614007870177:web:fcdcb077783ac7cc479da0",
+    measurementId: "G-PMX9B9RCRL"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getDatabase(app);
+
+  // ---------- UI elements ----------
+  const lobby = document.getElementById('lobby');
+  const gameDiv = document.getElementById('game');
+  const createBtn = document.getElementById('createBtn');
+  const joinBtn = document.getElementById('joinBtn');
+  const joinCodeInput = document.getElementById('joinCodeInput');
+  const roomInfo = document.getElementById('roomInfo');
+  const roomCodeDisplay = document.getElementById('roomCodeDisplay');
+  const waitingMsg = document.getElementById('waitingMsg');
+  const copyBtn = document.getElementById('copyBtn');
+  const youAre = document.getElementById('youAre');
+  const status = document.getElementById('status');
+  const score1El = document.getElementById('score1');
+  const score2El = document.getElementById('score2');
+  const restartBtn = document.getElementById('restartBtn');
+  const micBtn = document.getElementById('micBtn');
+  const callStatus = document.getElementById('callStatus');
+
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+  const gridSize = 10;
+  const spacing = 40;
+  const offset = 35;
+
+  let roomCode = null;
+  let myPlayer = null; // 1 or 2
+  let gameState = { lines: [], boxes: [], currentPlayer: 1, players: {} };
+  let selectedDots = [];
+
+  function generateRoomCode() {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let code = "";
+    for (let i = 0; i < 5; i++) code += chars[Math.floor(Math.random() * chars.length)];
+    return code;
+  }
+
+  // ---------- Create room ----------
+  createBtn.addEventListener('click', async () => {
+    roomCode = generateRoomCode();
+    myPlayer = 1;
+
+    const initialState = {
+      lines: [],
+      boxes: [],
+      currentPlayer: 1,
+      players: { p1: true, p2: false },
+      createdAt: Date.now()
+    };
+
+    await set(ref(db, 'rooms/' + roomCode), initialState);
+
+    // Mark player1 presence, auto-cleanup-ish on disconnect (optional)
+    const p1Ref = ref(db, 'rooms/' + roomCode + '/players/p1');
+    onDisconnect(p1Ref).set(false);
+
+    roomCodeDisplay.innerText = roomCode;
+    roomInfo.classList.remove('hidden');
+    createBtn.disabled = true;
+    joinBtn.disabled = true;
+    joinCodeInput.disabled = true;
+
+    listenToRoom();
+  });
+
+  copyBtn.addEventListener('click', () => {
+    navigator.clipboard.writeText(roomCode);
+    copyBtn.innerText = "Copied!";
+    setTimeout(() => copyBtn.innerText = "Copy", 1500);
+  });
+
+  // ---------- Join room ----------
+  joinBtn.addEventListener('click', async () => {
+    const code = joinCodeInput.value.trim().toUpperCase();
+    if (!code) return alert("Enter a room code!");
+
+    const roomRef = ref(db, 'rooms/' + code);
+    const snap = await get(roomRef);
+
+    if (!snap.exists()) {
+      alert("Room not found! Check the code.");
+      return;
+    }
+
+    const data = snap.val();
+    if (data.players && data.players.p2) {
+      alert("Room is already full!");
+      return;
+    }
+
+    roomCode = code;
+    myPlayer = 2;
+
+    await update(ref(db, 'rooms/' + roomCode + '/players'), { p2: true });
+
+    const p2Ref = ref(db, 'rooms/' + roomCode + '/players/p2');
+    onDisconnect(p2Ref).set(false);
+
+    createBtn.disabled = true;
+    joinBtn.disabled = true;
+    joinCodeInput.disabled = true;
+
+    listenToRoom();
+  });
+
+  // ---------- Listen for state changes ----------
+  function listenToRoom() {
+    const roomRef = ref(db, 'rooms/' + roomCode);
+    onValue(roomRef, (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.val();
+      gameState.lines = data.lines ? Object.values(data.lines) : [];
+      gameState.boxes = data.boxes ? Object.values(data.boxes) : [];
+      gameState.currentPlayer = data.currentPlayer || 1;
+      gameState.players = data.players || {};
+
+      const bothJoined = gameState.players.p1 && gameState.players.p2;
+
+      if (bothJoined) {
+        lobby.style.display = 'none';
+        gameDiv.style.display = 'block';
+        youAre.innerText = "You are Player " + myPlayer + (myPlayer === 1 ? " (Red)" : " (Blue)");
+        status.innerText = "Player " + gameState.currentPlayer + "'s Turn" +
+          (gameState.currentPlayer === myPlayer ? " (Your turn!)" : "");
+        if (!voiceInitDone) {
+          voiceInitDone = true;
+          setupSignaling();
+        }
+      } else {
+        waitingMsg.innerText = "Waiting for the other player to join...";
+      }
+
+      updateScores();
+      drawBoard();
+    });
+  }
+
+  function updateScores() {
+    let s1 = gameState.boxes.filter(b => b.player === 1).length;
+    let s2 = gameState.boxes.filter(b => b.player === 2).length;
+    score1El.innerText = s1;
+    score2El.innerText = s2;
+  }
+
+  // ---------- Restart ----------
+  restartBtn.addEventListener('click', async () => {
+    if (!roomCode) return;
+    if (!confirm("Restart the game for both players?")) return;
+    await update(ref(db, 'rooms/' + roomCode), {
+      lines: [],
+      boxes: [],
+      currentPlayer: 1
+    });
+  });
+
+  // ---------- Drawing ----------
+  function drawBoard() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    gameState.boxes.forEach(box => {
+      ctx.fillStyle = box.player === 1 ? 'rgba(255, 0, 0, 0.3)' : 'rgba(0, 0, 255, 0.3)';
+      ctx.fillRect(box.x * spacing + offset + 2, box.y * spacing + offset + 2, spacing - 4, spacing - 4);
+    });
+
+    gameState.lines.forEach(line => {
+      ctx.strokeStyle = line.player === 1 ? 'red' : 'blue';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(line.p1.x * spacing + offset, line.p1.y * spacing + offset);
+      ctx.lineTo(line.p2.x * spacing + offset, line.p2.y * spacing + offset);
+      ctx.stroke();
+    });
+
+    for (let i = 0; i < gridSize; i++) {
+      for (let j = 0; j < gridSize; j++) {
+        ctx.fillStyle = "black";
+        ctx.beginPath();
+        ctx.arc(i * spacing + offset, j * spacing + offset, 5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  function isLineExists(p1, p2) {
+    return gameState.lines.some(l =>
+      (l.p1.x === p1.x && l.p1.y === p1.y && l.p2.x === p2.x && l.p2.y === p2.y) ||
+      (l.p1.x === p2.x && l.p1.y === p2.y && l.p2.x === p1.x && l.p2.y === p1.y)
+    );
+  }
+
+  // ---------- Handle clicks ----------
+  canvas.addEventListener('pointerdown', async (e) => {
+    if (!roomCode || gameState.currentPlayer !== myPlayer) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const x = Math.round(((e.clientX - rect.left) * scaleX - offset) / spacing);
+    const y = Math.round(((e.clientY - rect.top) * scaleY - offset) / spacing);
+
+    if (x >= 0 && x < gridSize && y >= 0 && y < gridSize) {
+      selectedDots.push({ x, y });
+      if (selectedDots.length === 2) {
+        let d1 = selectedDots[0], d2 = selectedDots[1];
+        if ((Math.abs(d1.x - d2.x) + Math.abs(d1.y - d2.y) === 1) && !isLineExists(d1, d2)) {
+          await playMove(d1, d2);
+        }
+        selectedDots = [];
+      }
+    }
+  });
+
+  async function playMove(d1, d2) {
+    const newLines = [...gameState.lines, { p1: d1, p2: d2, player: myPlayer }];
+    const newBoxes = [...gameState.boxes];
+
+    function lineExistsIn(lines, p1, p2) {
+      return lines.some(l =>
+        (l.p1.x === p1.x && l.p1.y === p1.y && l.p2.x === p2.x && l.p2.y === p2.y) ||
+        (l.p1.x === p2.x && l.p1.y === p2.y && l.p2.x === p1.x && l.p2.y === p1.y)
+      );
+    }
+
+    let boxesFound = 0;
+    for (let i = 0; i < gridSize - 1; i++) {
+      for (let j = 0; j < gridSize - 1; j++) {
+        if (!newBoxes.some(b => b.x === i && b.y === j)) {
+          if (lineExistsIn(newLines, {x:i,y:j}, {x:i+1,y:j}) &&
+              lineExistsIn(newLines, {x:i,y:j+1}, {x:i+1,y:j+1}) &&
+              lineExistsIn(newLines, {x:i,y:j}, {x:i,y:j+1}) &&
+              lineExistsIn(newLines, {x:i+1,y:j}, {x:i+1,y:j+1})) {
+            newBoxes.push({ x: i, y: j, player: myPlayer });
+            boxesFound++;
+          }
+        }
+      }
+    }
+
+    const nextPlayer = boxesFound === 0 ? (myPlayer === 1 ? 2 : 1) : myPlayer;
+
+    await update(ref(db, 'rooms/' + roomCode), {
+      lines: newLines,
+      boxes: newBoxes,
+      currentPlayer: nextPlayer
+    });
+  }
+
+  // ---------- Voice Chat (WebRTC, signaled via Firebase) ----------
+  let voiceInitDone = false;
+  let localStream = null;
+  let peerConnection = null;
+  let micActive = false;
+  let remoteAudioEl = null;
+
+  const rtcConfig = {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' }
+    ]
+  };
+
+  function setupSignaling() {
+    // Listen for offers/answers/ICE meant for me
+    const myRole = myPlayer === 1 ? 'p1' : 'p2';
+    const otherRole = myPlayer === 1 ? 'p2' : 'p1';
+
+    const sigRef = ref(db, 'rooms/' + roomCode + '/signal/' + myRole);
+    onChildAdded(sigRef, async (snap) => {
+      const msg = snap.val();
+      if (!msg) return;
+
+      if (msg.type === 'offer') {
+        await ensurePeerConnection();
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+        await push(ref(db, 'rooms/' + roomCode + '/signal/' + otherRole), {
+          type: 'answer', sdp: answer
+        });
+      } else if (msg.type === 'answer') {
+        if (peerConnection && !peerConnection.currentRemoteDescription) {
+          await peerConnection.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+        }
+      } else if (msg.type === 'candidate') {
+        if (peerConnection) {
+          try { await peerConnection.addIceCandidate(msg.candidate); } catch (e) {}
+        }
+      }
+      // cleanup this message
+      remove(snap.ref);
+    });
+  }
+
+  async function ensurePeerConnection() {
+    if (peerConnection) return peerConnection;
+
+    peerConnection = new RTCPeerConnection(rtcConfig);
+
+    const otherRole = myPlayer === 1 ? 'p2' : 'p1';
+
+    peerConnection.onicecandidate = (event) => {
+      if (event.candidate) {
+        push(ref(db, 'rooms/' + roomCode + '/signal/' + otherRole), {
+          type: 'candidate', candidate: event.candidate.toJSON()
+        });
+      }
+    };
+
+    peerConnection.ontrack = (event) => {
+      if (!remoteAudioEl) {
+        remoteAudioEl = document.createElement('audio');
+        remoteAudioEl.autoplay = true;
+        document.body.appendChild(remoteAudioEl);
+      }
+      remoteAudioEl.srcObject = event.streams[0];
+      callStatus.innerText = "🔊 Connected";
+    };
+
+    peerConnection.onconnectionstatechange = () => {
+      if (peerConnection.connectionState === 'disconnected' || peerConnection.connectionState === 'failed') {
+        callStatus.innerText = "Call disconnected";
+      }
+    };
+
+    if (localStream) {
+      localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+    }
+
+    return peerConnection;
+  }
+
+  micBtn.addEventListener('click', async () => {
+    if (!roomCode) return;
+
+    if (!micActive) {
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (err) {
+        alert("Mic access denied or unavailable: " + err.message);
+        return;
+      }
+
+      micActive = true;
+      micBtn.innerText = "🎤 Mic On";
+      micBtn.classList.add('active');
+      callStatus.innerText = "Connecting...";
+
+      await ensurePeerConnection();
+
+      // Player 1 initiates the call offer
+      if (myPlayer === 1) {
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+        await push(ref(db, 'rooms/' + roomCode + '/signal/p2'), {
+          type: 'offer', sdp: offer
+        });
+      }
+    } else {
+      // toggle mute instead of fully ending, simpler UX
+      const enabled = localStream.getAudioTracks()[0].enabled;
+      localStream.getAudioTracks()[0].enabled = !enabled;
+      if (!enabled) {
+        micBtn.innerText = "🎤 Mic On";
+        micBtn.classList.remove('muted');
+        micBtn.classList.add('active');
+      } else {
+        micBtn.innerText = "🔇 Mic Off";
+        micBtn.classList.remove('active');
+        micBtn.classList.add('muted');
+      }
+    }
+  });
+
+  drawBoard();
+</script>
+
+</body>
+</html>
